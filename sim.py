@@ -1,5 +1,3 @@
-#
-
 # On Linux, tested with:
 # - python			3.11.2
 # - PyOpenGL		3.1.6
@@ -41,7 +39,7 @@ class Drone:
 		self.x = 0		# North [m]
 		self.y = 0		# South [m]
 		self.yaw = 0	# Yaw [-180, 180] where 0 points north
-		self.alt = 7	# Altitude [m]
+		self.alt = 10	# Altitude [m]
 
 class CameraSim:
 	def __init__(self, renderer, drone):
@@ -56,11 +54,13 @@ class CameraSim:
 
 		self.move = False	# For testing
 
-		self.videoHost = "192.168.211.152"
+		self.videoHost = "yourhost.com"
 		#self.videoHost = "127.0.0.1"
 		self.videoPort = 5000
 
 		self.calibrate = False
+
+		self.markerOrientation = 45 # Clockwise
 
 		if renderer == "gst":
 			self.initGST()
@@ -96,15 +96,17 @@ class CameraSim:
 		glMatrixMode(GL_MODELVIEW)
 		glLoadIdentity()
 
-		glRotatef(-self.drone.yaw, 0, 0, 1)
+		# Transformations are applied in reverse order
 
-		glTranslatef(-self.drone.x, -self.drone.y, -self.drone.alt)
-		#glTranslatef(0, 0, -1)
+		glRotatef(self.drone.yaw * self.factor, 0, 0, 1)
+		glTranslatef(self.drone.x, self.drone.y * self.factor, -self.drone.alt)
+		glRotatef(self.markerOrientation * self.factor, 0, 0, 1) # rotate the marker through its center
+		glTranslatef(-self.markerWidth / 2.0, -self.markerHeight / 2.0, 0) # move marker to its center
 
-		#glRotatef(80, 0, 1, 0)
+		if self.renderer == "pygame":
+			glRotatef(180, 0, 0, 1) # pygame is rotated
 
 		# Center in (0,0)
-		glTranslatef(-self.markerWidth / 2.0, -self.markerHeight / 2.0, 0)
 
 		glBegin(GL_QUADS)
 		glTexCoord2f(0, 0); glVertex3f(0, 0, 0)
@@ -169,9 +171,16 @@ class CameraSim:
 			display = (1280 / 2, 720 / 2)
 			pygame.display.set_mode(display, pygame.DOUBLEBUF | pygame.OPENGL | pygame.RESIZABLE)
 
+			# pygame has its axis inverted => use glOrtho() to make consistent with GLUT
+			glMatrixMode(GL_PROJECTION)
+			glLoadIdentity()
+			glOrtho(0, 1280, 720, 0, 0.1, 0)
+			self.factor = 1
+
 		elif self.renderer == "gst":
 			self.initGLUT()
 			self.initOffScreen()
+ 			self.factor = -1
 
 		self.windowResized(self.outWidth, self.outHeight)
 
@@ -240,7 +249,6 @@ class CameraSim:
 				return
 
 	def runPyGame(self):
-		# Render the scene
 		while True:
 			for event in pygame.event.get():
 				if event.type == pygame.QUIT:
@@ -283,6 +291,16 @@ class MavlinkThread():
 		self.running = False
 		self.thread.interrupt()
 
+	# The camera jumps a little durnig the last inches because the MAVLink location is provided in Lat/Lng with a precision of 7 digits.
+	# This functions does some esthetical smoothing.
+	def smoothLatLng(self, newVal, oldVal):
+		e = abs(newVal - oldVal)
+		if e <= 1e7:
+			f = 0.9
+			return (1 - f) * newVal + f * oldVal
+		else:
+			return newVal
+
 	def run(self):
 		print("MAVLink thread started")
 
@@ -295,20 +313,21 @@ class MavlinkThread():
 
 				lat = msg.lat / 1e7
 				lon = msg.lon / 1e7
-				alt = msg.alt / 1e3
-				yaw = msg.hdg / 100.0 - 360
+				alt = msg.alt / 100.0
+				yaw = msg.hdg / 100.0 - 360 # yaw [-180, 180]
 
 				# Set marker pos to initial pos
 				if self.markerPos is None:
 					print("Drone connected")
-					offsetX = 0.0000001
-					offsetY = 0.0000001
+					offsetX = 0.000001
+					offsetY = 0.000001
 					self.markerPos = (lat + offsetX, lon + offsetY)
 
 				delta_lat_m, delta_lng_m = delta_lat_lng_to_meters(lat, lon, self.markerPos[0], self.markerPos[1])
 
-				self.drone.x = -delta_lng_m * 1e7
-				self.drone.y = delta_lat_m * 1e7
+				self.drone.x = self.smoothLatLng(self.drone.x, delta_lng_m * 1e7)
+				self.drone.y = self.smoothLatLng(self.drone.y, delta_lat_m * 1e7)
+
 				self.drone.alt = alt / 10 # TEMP: / 10
 				self.drone.yaw = yaw
 
@@ -372,7 +391,7 @@ mavlinkThread.start()
 camSim = CameraSim("gst", drone)		# Stream
 #camSim = CameraSim("pygame", drone)	# Test
 
-camSim.image_path = "images/ground.jpg"
+camSim.image_path = "images/landing-target.jpg"
 camSim.imgPixelsPerMeter = 466 / 0.47	# 466 [px] = 0.47 [m]
 #camSim.calibrate = True	# Not implemented. TODO: Export random images to calibrate the simulated camera. See instructions here: https://github.com/kripper/vision-landing-2/
 #camSim.move = True
